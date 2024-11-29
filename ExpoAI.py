@@ -29,6 +29,28 @@ def lazy_prop(prop):
     return inner
 
 
+def image_to_base64(pil_image, format="PNG"):
+    """
+    Converts a PIL.Image object to a base64 encoded string.
+
+    Args:
+        pil_image (PIL.Image.Image): The PIL image to encode.
+        format (str): The format to save the image in (e.g., "PNG", "JPEG").
+
+    Returns:
+        str: The base64 encoded representation of the image.
+    """
+    # Save the image to an in-memory byte stream
+    buffer = BytesIO()
+    pil_image.save(buffer, format=format)
+    buffer.seek(0)  # Reset the buffer pointer to the start
+
+    # Get the byte data and encode it to base64
+    img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return img_base64
+
+
 # def numpy_to_base64(image_array):
 #     """
 #     Converts a NumPy array representing an RGB image into a Base64 string.
@@ -132,7 +154,7 @@ class ExpoAI:
     def image_context(self, value):
         self._image_context = value
         del self._image_gen_prompt
-        del self._image
+        self.update_image(prompt=value)
 
     @property
     def item_context(self):
@@ -245,6 +267,11 @@ class ExpoAI:
 
         img_id = response.json()['id']
         retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+        ret = False
+        while not ret:
+            retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+            if retrieval.json()['status'] == 'Ready':
+                ret = True
 
         img_url = retrieval.json()['result']['sample']
         imgres = requests.get(img_url)
@@ -329,5 +356,41 @@ class ExpoAI:
         imgres = requests.get(img_url)
         image = Image.open(BytesIO(imgres.content))
         return image, shifted, mask
+    
+    def update_image(self, prompt):
 
+        b64_img = image_to_base64(self.image)
+
+        url = "https://api.bfl.ml/v1/flux-pro-1.1-ultra"
+
+        payload = {
+            "prompt": prompt,
+            "image_prompt": b64_img,
+            "seed": 42,
+            "aspect_ratio": "4:3",
+            "safety_tolerance": 6,
+            "output_format": "jpeg",
+            "raw": False,
+            "image_prompt_strength": 0.1
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Key": bfl_key
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+
+        img_id = response.json()['id']
+        ret = False
+        retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+        while not ret:
+            retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+            if retrieval.json()['status'] == 'Ready':
+                ret = True
+
+        img_url = retrieval.json()['result']['sample']
+
+        imgres = requests.get(img_url)
+        image = Image.open(BytesIO(imgres.content))
+        self._image = image
 
