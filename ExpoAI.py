@@ -4,12 +4,13 @@ from PIL import Image
 from io import BytesIO
 import argparse
 import re
+from api_keys import open_ai_key
 
 parser = argparse.ArgumentParser(description="Prompt AI model")
 parser.add_argument("--patient_text", help="balbal")
 args = parser.parse_args()
 
-client = OpenAI() #insert key
+client = OpenAI(api_key=open_ai_key) #insert key
 
 def lazy_prop(prop):
     """Decorator which implements lazy loading/computing functionality for instance
