@@ -3,8 +3,12 @@ import requests
 from PIL import Image
 from io import BytesIO
 import argparse
+import time
 import re
-from api_keys import open_ai_key
+from api_keys import open_ai_key, bfl_key
+import cv2
+import numpy as np
+import base64
 
 parser = argparse.ArgumentParser(description="Prompt AI model")
 parser.add_argument("--patient_text", help="balbal")
@@ -23,6 +27,77 @@ def lazy_prop(prop):
             return prop(self)
 
     return inner
+
+
+# def numpy_to_base64(image_array):
+#     """
+#     Converts a NumPy array representing an RGB image into a Base64 string.
+#
+#     Parameters:
+#         image_array (numpy.ndarray): Input RGB image as a NumPy array.
+#
+#     Returns:
+#         str: Base64 string representation of the image.
+#     """
+#     # Convert the NumPy array to a PIL Image
+#     image = Image.fromarray(image_array)
+#
+#     # Save the image to a BytesIO object in memory
+#     buffered = BytesIO()
+#     image.save(buffered, format="PNG")  # Use PNG or any format you prefer
+#
+#     # Encode the binary data to Base64
+#     base64_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+#
+#     return base64_str
+
+
+def numpy_to_base64(image_array):
+    """
+    Converts a NumPy array representing an RGB image into a Base64 string.
+    """
+    _, encoded_image = cv2.imencode('.png', image_array)  # Convert to PNG format
+    return base64.b64encode(encoded_image).decode('utf-8')
+
+
+def shift_image_with_mask(image, dx, dy):
+    """
+    Shifts an image by (dx, dy) and generates a binary mask highlighting the blank areas.
+
+    Parameters:
+        image (numpy.ndarray): Input image.
+        dx (int): Horizontal shift (positive = right, negative = left).
+        dy (int): Vertical shift (positive = down, negative = up).
+
+    Returns:
+        shifted_image (numpy.ndarray): The shifted image with blank areas filled with black.
+        mask (numpy.ndarray): Binary mask of the blank areas (1 = blank, 0 = original image).
+    """
+    # Get image dimensions
+    height, width = image.shape[:2]
+
+    # Create translation matrix
+    translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
+
+    # Shift the image using warpAffine
+    shifted_image = cv2.warpAffine(image, translation_matrix, (width, height), borderValue=(0, 0, 0))
+
+    # Create a blank mask of the same size as the image
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    # Define the area covered by the original image after shifting
+    x_start = max(dx, 0)
+    x_end = min(width + dx, width)
+    y_start = max(dy, 0)
+    y_end = min(height + dy, height)
+
+    # Set the covered area to  in the mask
+    mask[y_start:y_end, x_start:x_end] = 1
+
+    # Invert the mask to highlight blank areas
+    #mask = 1 - mask
+
+    return shifted_image, mask
 
 
 class ExpoAI:
@@ -147,23 +222,54 @@ class ExpoAI:
 
     def image_gen(self):
 
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=self.image_gen_prompt,
-            size="1024x1024",
-            quality="standard",
-            n=1
-        )
+        # Black Forest Labs gen
+        url = "https://api.bfl.ml/v1/flux-pro-1.1-ultra"
 
-        image_url = response.data[0].url
+        payload = {
+            "prompt": self.image_gen_prompt,
+            "seed": 42,
+            "aspect_ratio": "4:3",
+            "safety_tolerance": 6,
+            "output_format": "jpeg",
+            "raw": False,
+            "image_prompt_strength": 0.1
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Key": bfl_key
+        }
 
-        # Fetch the image data
-        response = requests.get(image_url)
-        response.raise_for_status()  # Will raise an exception for bad status codes
+        response = requests.post(url, json=payload, headers=headers)
 
-        # View the image
-        image = Image.open(BytesIO(response.content))
+        time.sleep(10)
+
+        img_id = response.json()['id']
+        retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+
+        img_url = retrieval.json()['result']['sample']
+        imgres = requests.get(img_url)
+        image = Image.open(BytesIO(imgres.content))
         return image
+
+
+        # DALL-E gen
+        # response = client.images.generate(
+        #     model="dall-e-3",
+        #     prompt=self.image_gen_prompt,
+        #     size="1024x1024",
+        #     quality="standard",
+        #     n=1
+        # )
+        #
+        # image_url = response.data[0].url
+        #
+        # # Fetch the image data
+        # response = requests.get(image_url)
+        # response.raise_for_status()  # Will raise an exception for bad status codes
+        #
+        # # View the image
+        # image = Image.open(BytesIO(response.content))
+        # return image
 
     @property
     @lazy_prop
@@ -176,5 +282,52 @@ class ExpoAI:
 
     def show_gen_im(self):
         self.image.show()
+
+    def image_extension(self, dx, dy):
+
+        img_arr = np.array(self.image)
+        shifted, mask = shift_image_with_mask(img_arr, dx=dx, dy=dy)
+
+        b64_shifted = numpy_to_base64(shifted)
+        b64_mask = numpy_to_base64(mask)
+        url = "https://api.bfl.ml/v1/flux-pro-1.0-fill"
+
+        payload = {
+            "image": b64_shifted,
+            "mask": b64_mask,
+            "prompt": "Fill the masked area with a natural extension of the image, maintaining: \
+                    - **Context**: Reflect the scene, setting, or environment shown in the rest of the image. \
+                    - **Continuity**: Ensure elements like patterns, textures, and objects flow seamlessly from the existing parts of the image into the masked area. \
+                    - **Lighting**: Match the lighting, shadows, and color tones seen in the unmasked parts.\
+                    - **Details**: Keep the level of detail consistent, including any background elements or minor features.\
+                    - **Mood**: Preserve the overall mood or atmosphere of the image.\
+                    \
+                    **Ensure no new, unrelated elements are added; the extension should look as if it was always part of the original image.**",
+            "steps": 50,
+            "prompt_upsampling": False,
+            "guidance": 60,
+            "output_format": "jpeg",
+            "safety_tolerance": 6
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Key": bfl_key
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+
+        img_id = response.json()['id']
+        ret = False
+        retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+        while not ret:
+            retrieval = requests.get(f"""https://api.bfl.ml/v1/get_result?id={img_id}""", headers=headers)
+            if retrieval.json()['status'] == 'Ready':
+                ret = True
+
+        img_url = retrieval.json()['result']['sample']
+
+        imgres = requests.get(img_url)
+        image = Image.open(BytesIO(imgres.content))
+        return image, shifted, mask
 
 
